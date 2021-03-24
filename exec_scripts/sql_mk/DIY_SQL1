@@ -1,0 +1,537 @@
+
+--以序列来表示账户id
+create sequence acc_id
+start with 10000
+increment by 1
+order;
+/
+
+--以序列来表示记录表的行号
+create sequence callnumber
+start with 10000000000
+increment by 1
+order;
+/
+ 
+--以序列来记录用户身份证号码
+create sequence IDENTIFICATION
+start with 100000000000000000
+increment by 1;
+/
+
+--新建的用户信息表
+--drop table CMCC_USER_INFO;
+
+create table CMCC_USER_INFO(
+"USRID" VARCHAR(40) ,
+"MOBILE" VARCHAR(32) NOT NULL ,
+"USER_NAME" VARCHAR(10) NOT NULL ,
+"STATUS" NUMBER DEFAULT 0  NOT NULL ,
+"LOGIN_DATE" DATE DEFAULT SYSDATE NOT NULL ,
+"SEX" VARCHAR(10),
+"LOCATION" VARCHAR(1024),
+"IDENTIFICATION" bigint NOT NULL)
+partition by hash("USRID") partitions 10;
+/
+
+create  index "CMCC_USER_INFO_STATUS" on "UPBMS"."CMCC_USER_INFO" ("STATUS", "USRID") local
+/
+create  index "IDX_CMCC_USER_INFO_MOBILE" on "UPBMS"."CMCC_USER_INFO" ("MOBILE") global partition by hash(mobile) partitions 12
+/
+reindex CMCC_USER_INFO.*;
+/
+
+
+create table CMCC_USER_INFO_COUNT(
+"USRID" VARCHAR(40) ,
+"MOBILE" VARCHAR(32) NOT NULL ,
+"USER_NAME" VARCHAR(10) NOT NULL ,
+"STATUS" NUMBER DEFAULT 0  NOT NULL ,
+"LOGIN_DATE" DATE DEFAULT SYSDATE NOT NULL ,
+"SEX" VARCHAR(10),
+"LOCATION" VARCHAR(1024),
+"IDENTIFICATION" numeric NOT NULL)
+partition by hash("USRID") partitions 10;
+/
+
+create  index "CMCC_USER_INFO_COUNT_STATUS" on "UPBMS"."CMCC_USER_INFO_COUNT" ("STATUS", "USRID") local
+/
+create  index "IDX_CMCC_USER_INFO_COUNT_MOBILE" on "UPBMS"."CMCC_USER_INFO_COUNT" ("MOBILE") global partition by hash(mobile) partitions 12
+/
+reindex CMCC_USER_INFO_COUNT.*;
+/
+
+--新建用户账户表
+--drop table USER_ACCOUNT;
+
+create table USER_ACCOUNT(
+"ACCOUNTID" VARCHAR(40),
+"USRID" VARCHAR(40),
+"IDENTIFICATION" bigint,
+"USER_NAME" VARCHAR(10) NOT NULL ,
+"STATUS" NUMBER DEFAULT 0  NOT NULL ,
+"MOBILE" VARCHAR(32) NOT NULL,
+"BALANCE" numeric,
+"LAST_UPDATE_AMOUNT" numeric,
+"LOGIN_DATE" DATE DEFAULT SYSDATE NOT NULL,
+"SEX" VARCHAR(10),
+"LOCATION" VARCHAR(1024))
+/
+
+reindex USER_ACCOUNT.*
+/
+create index USER_ACCOUNT_USRID_index on USER_ACCOUNT(ACCOUNTID) local
+/
+create index USER_ACCOUNT_STATUS_index on USER_ACCOUNT(STATUS) local
+/
+--转账成功记录表
+
+create table SUCC_TRANSFER_LOG(
+"TRANS_OUT_ACCOUNT" VARCHAR(40),
+"TRANS_IN_ACCOUNT" VARCHAR(40),
+"OUT_AMOUNT" numeric,
+"TRANSFERDATE" date default sysdate,
+"COMMENTS" VARCHAR(400)
+);
+/
+
+create index SUCC_TRANSFER_LOG_USRID_index1 on SUCC_TRANSFER_LOG(TRANS_OUT_ACCOUNT) local
+/
+create index SUCC_TRANSFER_LOG_USRID_index2 on SUCC_TRANSFER_LOG(TRANS_IN_ACCOUNT) local
+/
+reindex SUCC_TRANSFER_LOG.*
+/
+
+--转账失败记录表
+
+create table ERR_TRANSFER_LOG(
+"TRANS_OUT_ACCOUNT" VARCHAR(40),
+"TRANS_IN_ACCOUNT" VARCHAR(40),
+"OUT_AMOUNT" numeric,
+"ERR_INFO" VARCHAR(200),
+"TRANSFERDATE" date default sysdate,
+"COMMENTS" VARCHAR(400)
+);
+/
+
+create index ERR_TRANSFER_LOG_USRID_index1 on ERR_TRANSFER_LOG(TRANS_OUT_ACCOUNT) local
+/
+create index ERR_TRANSFER_LOG_USRID_index2 on ERR_TRANSFER_LOG(TRANS_IN_ACCOUNT) local
+/
+reindex ERR_TRANSFER_LOG.*
+/
+--转账信息记录的自治事务
+
+CREATE OR REPLACE PROCEDURE RECORD_LOG
+			(option varchar(10),--记录选项
+			 out_cardno in VARCHAR,--转出号码标识
+			 in_cardno in VARCHAR,--转入号码标识
+			 trans in numeric,--转账金额
+			 errcode in VARCHAR)--错误信息
+as 
+			--PRAGMA AUTONOMOUS_TRANSACTION;--标识自治
+begin
+			if option='info' then
+					insert into SUCC_TRANSFER_LOG(TRANS_OUT_ACCOUNT,TRANS_IN_ACCOUNT,OUT_AMOUNT,COMMENTS) values(out_cardno,in_cardno,trans,'TRANSFER SUCC');
+					commit;
+			elsif option='err' then
+					insert into ERR_TRANSFER_LOG(TRANS_OUT_ACCOUNT,TRANS_IN_ACCOUNT,OUT_AMOUNT,ERR_INFO,COMMENTS) values(out_cardno,in_cardno,trans,errcode,'TRANSFER FAILED');
+					commit;
+			else 
+					raise_application_error(-20005,'选项错误,请输入info/err');
+			end if;
+end;
+/
+
+
+--转账存储过程
+CREATE or REPLACE PROCEDURE SP_TRANSFER_MONEY
+(out_table in VARCHAR,--转出账户表
+in_table in VARCHAR,--转入账户表
+out_cardno in VARCHAR,--转出号码标识
+in_cardno in VARCHAR,--转入号码标识
+trans in numeric,--转账金额
+			 amount_var in VARCHAR,--表中余额字段
+			 NO_var in VARCHAR)--表中账户标识字段
+as
+	   remain numeric;--账户余额
+	   vcount_in int;--转入客户数目
+	   vcount_out int;--转出客户数目
+	   errcode_20000 varchar(1000);--20000错误信息
+	   errcode_20001 varchar(1000);--20001错误信息
+	   errcode_20002 varchar(1000);--20002错误信息
+	   errcode_20003 varchar(1000);--20003错误信息
+	   errcode_20004 varchar(1000);--20004错误信息
+	   
+BEGIN
+		 errcode_20000:='转出账号不正确';
+		 errcode_20001:='转账金额不能小于或为0';
+		 errcode_20002:='转入账号不正确';
+		 errcode_20003:='转入转出账户不能一致';
+		 errcode_20004:='余额不足';
+	   execute immediate 'select count(1) from '||in_table||' where '||NO_var||' = '||in_cardno into vcount_in;
+	   execute immediate 'select count(1) from '||out_table||' where '||NO_var||' = '||out_cardno into vcount_out;
+	if vcount_out=0 then
+					RECORD_LOG('err',out_cardno,in_cardno,trans,errcode_20000);
+					--raise_application_error(-20000,errcode_20000);
+					return;
+			elsif trans<=0 then 
+					RECORD_LOG('err',out_cardno,in_cardno,trans,errcode_20001);
+					--raise_application_error(-20001,errcode_20001);
+					return;
+			elsif vcount_in=0 then
+					RECORD_LOG('err',out_cardno,in_cardno,trans,errcode_20002);
+					--raise_application_error(-20002,errcode_20002);
+					return;
+			elsif in_cardno=out_cardno then
+					RECORD_LOG('err',out_cardno,in_cardno,trans,errcode_20003);
+					--raise_application_error(-20003,errcode_20003);
+					return;
+		  end if;
+		execute immediate 'select '||amount_var||' from '||out_table||' where '||NO_var||' = '||out_cardno into remain;
+		if remain < trans then
+					RECORD_LOG('err',out_cardno,in_cardno,trans,errcode_20004);
+					--raise_application_error(-20004,errcode_20004);
+					return;
+	else
+					dbms_output.put_line('BEGIN TRANS');
+					dbms_output.put_line('转出账户剩余: '||remain);
+										RECORD_LOG('info',out_cardno,in_cardno,trans,null);
+		execute immediate 'update '||out_table||' set '||amount_var||' = '||amount_var||' - '||trans||' where '||NO_var||' = '||out_cardno;
+		execute immediate 'update '||in_table||' set '||amount_var||' = '||amount_var||' + '||trans||' where '||NO_var||' = '||in_cardno;
+					dbms_output.put_line('BEGIN OK');
+					execute immediate 'select '||amount_var||' from '||out_table||' where '||NO_var||' = '||out_cardno into remain;
+					dbms_output.put_line('转出账户剩余: '||remain);
+					commit;
+		end if;
+END;
+/
+
+
+--CMCC_USER_INFO表有新记录插入时同步插入USER_ACCOUNT
+--drop TRIGGER ACCOUNT_DATE_INSERT;
+--CREATE OR REPLACE TRIGGER ACCOUNT_DATE_INSERT
+--	after INSERT
+--	on CMCC_USER_INFO
+--	for each row
+--	begin
+--		INSERT INTO USER_ACCOUNT(USRID,MOBILE,USER_NAME,STATUS,LOGIN_DATE,IDENTIFICATION) values(:new.USRID,:new.MOBILE,:new.USER_NAME,:new.STATUS,:new.LOGIN_DATE,:new.IDENTIFICATION);
+--		INSERT INTO CMCC_USER_INFO_COUNT values(:new.USRID,:new.MOBILE,:new.USER_NAME,:new.STATUS,:new.LOGIN_DATE,:new.SEX,:new.LOCATION,:new.IDENTIFICATION);
+--	end;
+/
+
+
+--商品信息表
+CREATE TABLE PRODUCT_INFO_TAB_CLOB(
+PRODUCT_TYPE VARCHAR(20),
+PRODUCT_NAME VARCHAR(40),
+PRICE NUMERIC,
+SOLD_TYPE VARCHAR(40),
+PRODUCT_INFO CLOB,
+DISCOUNT_INFO VARCHAR,
+DISCOUNT_TYPE VARCHAR,
+DISCOUNT VARCHAR,
+PRODUCT_UPDATE_COMMENTS CLOB,
+PRODUCT_UPDATE_DATE DATE)
+PARTITION BY LIST(PRODUCT_TYPE) PARTITIONS
+(
+PARTITION1 VALUES('语音'),
+PARTITION2 VALUES('视频'),
+PARTITION3 VALUES('文字'),
+PARTITION4 VALUES('娱乐'),
+PARTITION5 VALUES('办公'),
+PARTITION6 VALUES('虚拟化'),
+PARTITION7 VALUES('运动')
+)
+/
+
+CREATE TABLE PRODUCT_INFO_TAB(
+PRODUCT_TYPE VARCHAR(20),
+PRODUCT_NAME VARCHAR(40),
+PRICE NUMERIC,
+SOLD_TYPE VARCHAR(40),
+PRODUCT_INFO VARCHAR(20000),
+DISCOUNT_INFO VARCHAR,
+DISCOUNT_TYPE VARCHAR,
+DISCOUNT VARCHAR,
+PRODUCT_UPDATE_COMMENTS VARCHAR(20000),
+PRODUCT_UPDATE_DATE DATE)
+PARTITION BY LIST(PRODUCT_TYPE) PARTITIONS
+(
+PARTITION1 VALUES('语音'),
+PARTITION2 VALUES('视频'),
+PARTITION3 VALUES('文字'),
+PARTITION4 VALUES('娱乐'),
+PARTITION5 VALUES('办公'),
+PARTITION6 VALUES('虚拟化'),
+PARTITION7 VALUES('运动')
+)
+/
+
+create index PRODUCT_TYPE_index on PRODUCT_INFO_TAB(PRODUCT_TYPE) local
+/
+
+reindex PRODUCT_INFO_TAB.*
+/
+
+
+--用户订购信息表
+CREATE TABLE USER_ORDER_INFO(
+USER_ID VARCHAR,
+order_date date default sysdate,
+PRODUCT_TYPE VARCHAR(20),
+PRODUCT_NAME VARCHAR(40),
+PRICE NUMERIC,
+SOLD_TYPE VARCHAR(40),
+PRODUCT_INFO VARCHAR(20000),
+DISCOUNT_INFO VARCHAR,
+DISCOUNT_TYPE VARCHAR,
+DISCOUNT VARCHAR,
+status int
+)
+/
+create index USER_ORDER_INFO_USER on USER_ORDER_INFO(USER_ID)
+/
+
+
+--用户订购信息表2
+CREATE TABLE USER_ORDER_INFO_CLOB(
+USER_ID VARCHAR,
+order_date date default sysdate,
+PRODUCT_TYPE VARCHAR(20),
+PRODUCT_NAME VARCHAR(40),
+PRICE NUMERIC,
+SOLD_TYPE VARCHAR(40),
+PRODUCT_INFO clob,
+DISCOUNT_INFO VARCHAR,
+DISCOUNT_TYPE VARCHAR,
+DISCOUNT VARCHAR,
+status int
+)
+/
+create index USER_ORDER_INFO_CLOB_USER on USER_ORDER_INFO_CLOB(USER_ID)
+/
+
+
+CREATE GLOBAL temp TABLE USER_ORDER_INFO_temp(
+order_date date default sysdate,
+PRODUCT_TYPE VARCHAR(20),
+PRODUCT_NAME VARCHAR(40),
+PRICE NUMERIC,
+SOLD_TYPE VARCHAR(40),
+PRODUCT_INFO VARCHAR(20000),
+DISCOUNT_INFO VARCHAR,
+DISCOUNT_TYPE VARCHAR,
+DISCOUNT VARCHAR
+)
+/
+
+
+CREATE OR REPLACE PROCEDURE ORDER_PRODUCT
+as
+USRID USER_ORDER_INFO.USER_ID%TYPE;
+PRODUCT_TYPE USER_ORDER_INFO.PRODUCT_TYPE%TYPE;
+PRODUCT_NAME USER_ORDER_INFO.PRODUCT_NAME%TYPE;
+PRICE USER_ORDER_INFO.PRICE%TYPE;
+SOLD_TYPE USER_ORDER_INFO.SOLD_TYPE%TYPE;
+PRODUCT_INFO USER_ORDER_INFO.PRODUCT_INFO%TYPE;
+DISCOUNT_INFO USER_ORDER_INFO.DISCOUNT_INFO%TYPE;
+DISCOUNT_TYPE USER_ORDER_INFO.DISCOUNT_TYPE%TYPE;
+DISCOUNT USER_ORDER_INFO.DISCOUNT%TYPE;
+REMAIN USER_ACCOUNT.BALANCE%TYPE;
+v_sql varchar;
+rowsnum int;
+begin
+execute immediate  'select mod(dbms_random.random(),10000)+1 from dual' into rowsnum;
+send_msg(rowsnum);
+v_sql := 'select USRID from (select USRID,rownum a from USER_ACCOUNT where rownum < '||rowsnum||' and status = 1) where a > '||(rowsnum-2);
+send_msg(v_sql);
+execute immediate v_sql into USRID;
+send_msg(1);
+execute immediate  'select PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT from (select PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT,rownum a from PRODUCT_INFO_TAB where rownum < 16) where a > 14' into PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT;
+send_msg(2);
+insert into USER_ORDER_INFO values(USRID,sysdate,PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT,2);
+send_msg(3);
+execute immediate 'select BALANCE - '||PRICE||'*'||DISCOUNT||' from USER_ACCOUNT where USRID = '||USRID into REMAIN;
+if REMAIN < 0 then
+					send_msg(REMAIN||'--'||PRICE||'--'||DISCOUNT);
+          rollback;
+else
+        execute immediate 'update USER_ACCOUNT set BALANCE = '||REMAIN||' where USRID = '||USRID;
+        send_msg(4);
+end if;
+exception
+        when others then
+                rollback;
+end;
+/
+
+
+CREATE OR REPLACE PROCEDURE ORDER_PRODUCT_CLOB
+as
+USRID USER_ORDER_INFO_CLOB.USER_ID%TYPE;
+PRODUCT_TYPE USER_ORDER_INFO_CLOB.PRODUCT_TYPE%TYPE;
+PRODUCT_NAME USER_ORDER_INFO_CLOB.PRODUCT_NAME%TYPE;
+PRICE USER_ORDER_INFO_CLOB.PRICE%TYPE;
+SOLD_TYPE USER_ORDER_INFO_CLOB.SOLD_TYPE%TYPE;
+PRODUCT_INFO USER_ORDER_INFO_CLOB.PRODUCT_INFO%TYPE;
+DISCOUNT_INFO USER_ORDER_INFO_CLOB.DISCOUNT_INFO%TYPE;
+DISCOUNT_TYPE USER_ORDER_INFO_CLOB.DISCOUNT_TYPE%TYPE;
+DISCOUNT USER_ORDER_INFO_CLOB.DISCOUNT%TYPE;
+REMAIN USER_ACCOUNT.BALANCE%TYPE;
+v_sql varchar;
+rowsnum int;
+begin
+execute immediate  'select mod(dbms_random.random(),10000)+1 from dual' into rowsnum;
+send_msg(rowsnum);
+v_sql := 'select USRID from (select USRID,rownum a from USER_ACCOUNT where rownum < '||rowsnum||' and status = 1) where a > '||(rowsnum-2);
+send_msg(v_sql);
+execute immediate v_sql into USRID;
+send_msg(1);
+execute immediate  'select PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT from (select PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT,rownum a from PRODUCT_INFO_TAB_CLOB where rownum < 16) where a > 14' into PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT;
+send_msg(2);
+insert into USER_ORDER_INFO_CLOB values(USRID,sysdate,PRODUCT_TYPE,PRODUCT_NAME,PRICE,SOLD_TYPE,PRODUCT_INFO,DISCOUNT_INFO,DISCOUNT_TYPE,DISCOUNT,2);
+send_msg(3);
+execute immediate 'select BALANCE - '||PRICE||'*'||DISCOUNT||' from USER_ACCOUNT where USRID = '||USRID into REMAIN;
+if REMAIN < 0 then
+					send_msg(REMAIN||'--'||PRICE||'--'||DISCOUNT);
+          rollback;
+else
+        execute immediate 'update USER_ACCOUNT set BALANCE = '||REMAIN||' where USRID = '||USRID;
+        send_msg(4);
+end if;
+exception
+        when others then
+                rollback;
+end;
+/
+
+
+
+CREATE OR REPLACE PROCEDURE cancel_account
+as
+row int;
+v_sql varchar;
+v_sql1 varchar;
+v_sql2 varchar;
+rowsnum int;
+userid USER_ORDER_INFO.USER_ID%TYPE;
+begin
+execute immediate  'select count(1) from USER_ORDER_INFO' into rowsnum;
+send_msg(rowsnum);
+v_sql := 'select mod(' || rowsnum|| ',dbms_random.random()) from dual';--
+send_msg(v_sql);
+execute immediate v_sql into row;
+send_msg(row);
+if row = 0 then
+	return;
+else
+	execute immediate 'select USER_ID from USER_ORDER_INFO limit '||row||',1' into userid;
+	send_msg(userid);
+	execute immediate 'update USER_ACCOUNT set STATUS = 2 where USRID = '||userid;
+	v_sql1 := 'update USER_ORDER_INFO set PRODUCT_INFO = '||'''has no data!''' || ' where USER_ID = '||userid;
+	send_msg(v_sql1);
+	execute immediate v_sql1;
+	v_sql2 := 'update USER_ORDER_INFO set PRODUCT_INFO = '||'replicate('||'''QAZ123!@&*'''||',2000)' || ' where USER_ID = '||userid;	
+	send_msg(v_sql2);
+	execute immediate v_sql2;
+	execute immediate 'delete from USER_ACCOUNT where USRID = '||userid;
+	execute immediate 'delete from CMCC_USER_INFO where USRID = '||userid;
+	delete from USER_ORDER_INFO where PRODUCT_INFO like '%QAZ123!@&*%';
+endif;
+exception
+        when others then
+                rollback;
+end;
+/
+
+CREATE OR REPLACE PROCEDURE cancel_account_clob
+as
+row int;
+v_sql varchar;
+v_sql1 varchar;
+v_sql2 varchar;
+v_sql3 varchar;
+rowsnum int;
+userid USER_ORDER_INFO.USER_ID%TYPE;
+begin
+execute immediate  'select count(1) from USER_ORDER_INFO_CLOB' into rowsnum;
+send_msg(rowsnum);
+v_sql := 'select mod(' || rowsnum|| ',dbms_random.random()) from dual';
+send_msg(v_sql);
+execute immediate v_sql into row;
+if row = 0 then
+	return;
+else
+	execute immediate 'select USER_ID from USER_ORDER_INFO_CLOB limit '||row||',1' into userid;
+	send_msg(userid);
+	execute immediate 'update USER_ACCOUNT set STATUS = 2 where USRID = '||userid;
+	v_sql1 := 'update USER_ORDER_INFO_CLOB set PRODUCT_INFO = '||'''has no data!''' || ' where USER_ID = '||userid;
+	send_msg(v_sql1);
+	execute immediate v_sql1;
+	v_sql2 := 'update USER_ORDER_INFO_CLOB set PRODUCT_INFO = '||'replicate('||'''QAZ123!@&*'''||',2000)' || ' where USER_ID = '||userid;
+	send_msg(v_sql2);
+	execute immediate v_sql2;
+	execute immediate 'delete from USER_ACCOUNT where USRID = '||userid;
+	execute immediate 'delete from CMCC_USER_INFO where USRID = '||userid;
+	delete from USER_ORDER_INFO_CLOB where PRODUCT_INFO like '%QAZ123!@&*%';
+endif;
+exception
+        when others then
+                rollback;
+end;
+/
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE update_account
+(balance number,
+account int) 
+as
+	row int;
+	v_sql varchar;
+	v_sql1 varchar;
+
+
+
+	rowsnum int;
+	userid USER_ORDER_INFO.USER_ID%TYPE;
+begin
+     execute immediate  'select count(1) from USER_ACCOUNT where status = 0' into rowsnum;
+     send_msg(rowsnum);
+     v_sql := 'select mod(dbms_random.random(),' || rowsnum|| ') from dual';
+     send_msg(v_sql);
+     execute immediate v_sql into row;
+     execute immediate 'select USRID from USER_ACCOUNT limit '||row||',1' into userid;
+     send_msg(userid);
+     v_sql1 := 'update USER_ACCOUNT set ACCOUNTID = '||account ||','|| 'status = 1' || ',' || 'BALANCE = '|| balance ||' where USRID = '||userid;
+     send_msg(v_sql1);
+     execute immediate v_sql1;
+exception
+        when others then
+                rollback;
+end;
+/
+
+
+reindex PRODUCT_INFO_TAB.*
+/
+reindex PRODUCT_INFO_TAB_CLOB.*
+/
+reindex ERR_TRANSFER_LOG.*
+/
+reindex SUCC_TRANSFER_LOG.*
+/
+reindex USER_ACCOUNT.*
+/
+reindex CMCC_USER_INFO.*
+/
+reindex USER_ORDER_INFO.*
+/
+reindex USER_ORDER_INFO_CLOB.*
+/
+
+
