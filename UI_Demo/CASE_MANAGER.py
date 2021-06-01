@@ -8,12 +8,14 @@ import tkinter as tk
 import os
 from tkinter import ttk, filedialog, messagebox
 import chardet
+import xml.dom.minidom as xml
 
 
 class CreateUi:
 
     def __init__(self):
         """初始化界面"""
+        self.con_list = []
         self.window = tk.Tk()
         self.window.title("九州昆仑用例管理")
         self.window.iconbitmap('./icon_images/window_icon.ico')
@@ -24,13 +26,21 @@ class CreateUi:
         filemenu.add_command(label='保存', command=lambda: self.Menu_save_files(self.select_tree_path()))
         filemenu.add_command(label='新建文件', command=self.Menu_new_files)
         filemenu.add_command(label='新建目录', command=self.Menu_new_directs)
-        menubar.add_cascade(label='File', menu=filemenu)
+        menubar.add_cascade(label='文件', menu=filemenu)
 
         editmenu = tk.Menu(menubar, tearoff=0)
-        editmenu.add_command(label='运行', command=self.Menu_run_files)
+        editmenu.add_command(label='运行选中对象', command=self.Menu_run_files)
         editmenu.add_command(label='运行所有', command=self.Menu_run_all)
-        menubar.add_cascade(label='edit', menu=editmenu)
+        menubar.add_cascade(label='运行', menu=editmenu)
+        conmenu = tk.Menu(menubar, tearoff=0)
+
+        self.db_con = tk.StringVar()
+        self.db_con.set('当前连接对象：')
+        conmenu.add_command(label='添加数据库连接对象', command=self.add_con)
+        conmenu.add_command(label='选择数据库连接对象', command=self.choose_con)
+        menubar.add_cascade(label='数据库连接', menu=conmenu)
         self.window.config(menu=menubar)
+        tk.Label(self.window, textvariable=self.db_con).pack(side='top', anchor='w')
 
         pane_window = tk.PanedWindow(self.window, orient='horizontal', sashrelief='sunken')
         pane_window.pack(expand=1, fill='both')
@@ -70,6 +80,7 @@ class CreateUi:
         self.case_menu = tk.Menu(pane_window, tearoff=0)
         self.case_menu.add_command(label='Run As Python Case', command=lambda: self.Menu_run_files())
         self.case_menu.add_command(label='Run As Java Case', command=lambda: self.Menu_run_files())
+        self.case_menu.add_command(label='Reload', command=lambda: self.reload_tree())
         self.case_menu.add_command(label='Delete', command=lambda: self.del_file_dirs())
         """实现底部输出窗口"""
         self.output_window = tk.Frame(pane_window)
@@ -121,7 +132,6 @@ class CreateUi:
                 except Exception as e:
                     print(str(e))
                     tk.messagebox.showerror('err info:', '无法保存该文件')
-                    # raise
 
     def Menu_new_files(self):
         """新建文件"""
@@ -136,10 +146,9 @@ class CreateUi:
         else:
             tk.messagebox.showerror('err info', '请先选择要新建文件的目录!')
             return
-
-        new_win = tk.Tk()
-        new_win.title('The New File Name？')
-        file_name_text = tk.Text(new_win, undo=True, width=50, height=1)
+        new_file_win = tk.Tk()
+        new_file_win.title('The New File Name？')
+        file_name_text = tk.Text(new_file_win, undo=True, width=50, height=1)
         file_name_text.pack()
 
         def get_text(win, text_window):
@@ -157,7 +166,7 @@ class CreateUi:
                 tk.messagebox.showerror('err info', '请输入有效的文件名!')
             win.destroy()
 
-        tk.Button(new_win, text='确定', command=lambda: get_text(new_win, file_name_text)).pack()
+        tk.Button(new_file_win, text='确定', command=lambda: get_text(new_file_win, file_name_text)).pack()
 
     def Menu_new_directs(self):
         """新建目录"""
@@ -188,7 +197,6 @@ class CreateUi:
                     os.makedirs(dir)
                 else:
                     tk.messagebox.showerror('err info', '该文件夹已存在!')
-
             else:
                 tk.messagebox.showerror('err info', '请输入有效的文件夹名!')
             win.destroy()
@@ -202,15 +210,12 @@ class CreateUi:
             context = res.read()
             self.output_text.delete(1.0, 'end')
             self.output_text.insert(1.0, context, 'temp2')
-            # self.output_text.delete(1.0, 'end')
-            # for content in res.readlines():
-            #     self.output_text.insert('end', content)
 
     def Menu_run_all(self):
         """运行所有用例"""
         pass
 
-    def dir_call(self, path):
+    def dir_call(self, path, root_dir=''):
         """treeview用例目录结构展示"""
         i = 0
         node_dict = {}
@@ -233,7 +238,7 @@ class CreateUi:
                             node_dict[dir_key] = curr_node
                 i = + 1
             else:
-                last_node = self.dir_tree.insert('', 'end', values=(root, ''), text=dir_name)
+                last_node = self.dir_tree.insert(root_dir, 'end', values=(root, root_dir), text=dir_name)
                 if dirs:
                     for dir in dirs:
                         dir_key = root + '\\' + dir
@@ -250,8 +255,9 @@ class CreateUi:
         """获取点击对象的绝对路径"""
         try:
             nodeid = self.dir_tree.selection()[0]
-            print(self.dir_tree.item(nodeid))
+            # print(self.dir_tree.item(nodeid))
             current_path = self.dir_tree.item(nodeid)['values'][0]
+            # print(self.dir_tree.get_children(nodeid))
             return current_path
         except:
             pass
@@ -268,27 +274,224 @@ class CreateUi:
                 except Exception:
                     tk.messagebox.showerror('err info:', '无法打开该文件')
 
-    def reload_tree(self):
-        """重新加载目录"""
-        pass
-
     def del_file_dirs(self):
         """删除文件或者文件夹"""
         path = self.select_tree_path()
         if os.path.isfile(path):
-            os.remove(path)
-            tk.messagebox.showinfo('tips', '文件删除成功！')
+            a = tk.messagebox.askyesno('Will You?', '确认删除？')
+            if a:
+                self.del_item()
+                os.remove(path)
+                tk.messagebox.showinfo('tips', '文件删除成功！')
         if os.path.isdir(path):
-            os.rmdir(path)
-            tk.messagebox.showinfo('tips', '文件夹删除成功！')
+            b = tk.messagebox.askyesno('Will You?', '确认删除？')
+            if b:
+                self.del_item()
+                os.rmdir(path)
+                tk.messagebox.showinfo('tips', '文件夹删除成功！')
 
     def del_item(self):
         nodeid = self.dir_tree.selection()[0]
-        current_path = self.dir_tree.item(nodeid)['values'][0]
         self.dir_tree.delete(nodeid)
+
+    def reload_tree(self):
+        """重新加载目录"""
+        nodeid = self.dir_tree.selection()[0]
+        path = self.dir_tree.item(nodeid)['values'][0]
+        last_node = self.dir_tree.item(nodeid)['values'][1]
+        if os.path.isdir(path):
+            self.dir_tree.delete(nodeid)
+            self.dir_call(path, root_dir=last_node)
 
     def del_objects(self):
         a = tk.messagebox.askokcancel('Will You?', '删除实际文件？')
+
+    def add_con(self):
+        set_con_win = tk.Tk()
+        set_con_win.title('The New Connection Info？')
+        tk.Label(set_con_win, text='  数据库连接名称：').grid(row=0)
+        tk.Label(set_con_win, text='    数据库连接IP：').grid(row=1)
+        tk.Label(set_con_win, text='  数据库连接库名：').grid(row=2)
+        tk.Label(set_con_win, text='数据库连接用户名：').grid(row=3)
+        tk.Label(set_con_win, text='  数据库连接密码：').grid(row=4)
+
+        con_name = tk.Entry(set_con_win)
+        con_ip = tk.Entry(set_con_win)
+        con_db = tk.Entry(set_con_win)
+        con_user = tk.Entry(set_con_win)
+        con_password = tk.Entry(set_con_win)
+        con_name.grid(row=0, column=1, padx=30, pady=1)
+        con_ip.grid(row=1, column=1, padx=30, pady=1)
+        con_db.grid(row=2, column=1, padx=30, pady=1)
+        con_user.grid(row=3, column=1, padx=30, pady=1)
+        con_password.grid(row=4, column=1, padx=30, pady=1)
+
+        def sure_butt():
+            name_str = con_name.get()
+            if name_str == '':
+                tk.messagebox.showerror('err info:', '数据库连接名称不能为空!')
+                quit_butt()
+                return
+            ip_str = con_ip.get()
+            if ip_str == '':
+                tk.messagebox.showerror('err info:', '数据库连接IP不能为空!')
+                quit_butt()
+                return
+            db_str = con_db.get()
+            if db_str == '':
+                tk.messagebox.showerror('err info:', '数据库连接库名不能为空!')
+                quit_butt()
+                return
+            user_str = con_user.get()
+            if user_str == '':
+                tk.messagebox.showerror('err info:', '数据库连接用户名不能为空!')
+                quit_butt()
+                return
+            password_str = con_password.get()
+            if password_str == '':
+                tk.messagebox.showerror('err info:', '数据库连接密码不能为空!')
+                quit_butt()
+                return
+            xml_config = './DBCONNECTION.xml'
+            if os.path.exists(xml_config):
+                doc = xml.Document()  # 建立空白XML文档
+                root = doc.createElement('Managers')
+                root.setAttribute('DBNAME', 'KunLunJdbc')
+                root.setAttribute('OperatingSystem', 'Windows')
+                doc.appendChild(root)
+                """获取旧连接信息写入到新的空白文件"""
+                domtree = xml.parse(xml_config)
+                collection = domtree.documentElement
+                managertags = collection.getElementsByTagName("Manager")
+                for manager in managertags:
+                    nodemanager = doc.createElement('Manager')
+                    name_text = manager.getElementsByTagName("name")[0].childNodes[0].data
+                    if name_str == name_text:
+                        tk.messagebox.showerror('err info:', '%s 已存在' % name_str)
+                        return
+                    else:
+                        nodename = doc.createElement('name')
+                        nodename.appendChild(doc.createTextNode(name_text))
+
+                        ip_text = manager.getElementsByTagName("ip")[0].childNodes[0].data
+                        nodeip = doc.createElement('ip')
+                        nodeip.appendChild(doc.createTextNode(ip_text))
+
+                        db_text = manager.getElementsByTagName("db")[0].childNodes[0].data
+                        nodedb = doc.createElement('db')
+                        nodedb.appendChild(doc.createTextNode(db_text))
+
+                        user_text = manager.getElementsByTagName("user")[0].childNodes[0].data
+                        nodeuser = doc.createElement('user')
+                        nodeuser.appendChild(doc.createTextNode(user_text))
+
+                        password_text = manager.getElementsByTagName("password")[0].childNodes[0].data
+                        nodepassword = doc.createElement('password')
+                        nodepassword.appendChild(doc.createTextNode(password_text))
+
+                        nodemanager.appendChild(nodename)
+                        nodemanager.appendChild(nodeip)
+                        nodemanager.appendChild(nodedb)
+                        nodemanager.appendChild(nodeuser)
+                        nodemanager.appendChild(nodepassword)
+                        root.appendChild(nodemanager)
+                """追加新配置"""
+                nodemanager = doc.createElement('Manager')
+                nodename = doc.createElement('name')
+                nodename.appendChild(doc.createTextNode(name_str))
+                nodeip = doc.createElement('ip')
+                nodeip.appendChild(doc.createTextNode(ip_str))
+                nodedb = doc.createElement('db')
+                nodedb.appendChild(doc.createTextNode(db_str))
+                nodeuser = doc.createElement('user')
+                nodeuser.appendChild(doc.createTextNode(user_str))
+                nodepassword = doc.createElement('password')
+                nodepassword.appendChild(doc.createTextNode(password_str))
+                nodemanager.appendChild(nodename)
+                nodemanager.appendChild(nodeip)
+                nodemanager.appendChild(nodedb)
+                nodemanager.appendChild(nodeuser)
+                nodemanager.appendChild(nodepassword)
+                root.appendChild(nodemanager)
+                with open(xml_config, 'w') as f:
+                    doc.writexml(f, indent='\t', addindent='\t', newl='\n', encoding='utf-8')
+            else:
+                doc = xml.Document()
+                root = doc.createElement('Managers')
+                root.setAttribute('DBNAME', 'KunLunJdbc')
+                root.setAttribute('OperatingSystem', 'Windows')
+                doc.appendChild(root)
+                nodemanager = doc.createElement('Manager')
+                nodename = doc.createElement('name')
+                nodename.appendChild(doc.createTextNode(name_str))
+                nodeip = doc.createElement('ip')
+                nodeip.appendChild(doc.createTextNode(ip_str))
+                nodedb = doc.createElement('db')
+                nodedb.appendChild(doc.createTextNode(db_str))
+                nodeuser = doc.createElement('user')
+                nodeuser.appendChild(doc.createTextNode(user_str))
+                nodepassword = doc.createElement('password')
+                nodepassword.appendChild(doc.createTextNode(password_str))
+                nodemanager.appendChild(nodename)
+                nodemanager.appendChild(nodeip)
+                nodemanager.appendChild(nodedb)
+                nodemanager.appendChild(nodeuser)
+                nodemanager.appendChild(nodepassword)
+                root.appendChild(nodemanager)
+                with open(xml_config, 'w+') as f:
+                    doc.writexml(f, indent='\t', addindent='\t', newl='\n', encoding='utf-8')
+
+            set_con_win.destroy()
+
+        def quit_butt():
+            set_con_win.destroy()
+
+        tk.Button(set_con_win, text='确定', width=15, command=sure_butt).grid(row=6, pady=2)
+        tk.Button(set_con_win, text='退出', width=15, command=quit_butt).grid(row=6, column=1, pady=2, sticky='e')
+
+    def choose_con(self):
+        xml_config = './DBCONNECTION.xml'
+        domtree = xml.parse(xml_config)
+        collection = domtree.documentElement
+        managertags = collection.getElementsByTagName("Manager")
+        box_dir = {}
+        box_tup = ()
+        for manager in managertags:
+            name_text = manager.getElementsByTagName("name")[0].childNodes[0].data
+            box_tup = box_tup + (name_text,)
+            ip_text = manager.getElementsByTagName("ip")[0].childNodes[0].data
+            db_text = manager.getElementsByTagName("db")[0].childNodes[0].data
+            user_text = manager.getElementsByTagName("user")[0].childNodes[0].data
+            password_text = manager.getElementsByTagName("password")[0].childNodes[0].data
+            box_dir[name_text] = [ip_text, db_text, user_text, password_text]
+        sel_con_win = tk.Tk()
+        sel_con_win.title('选择你的连接对象')
+        con_name_choose = ttk.Combobox(sel_con_win)
+        con_name_choose['values'] = box_tup
+        tk.Label(sel_con_win, text='选择你的连接对象：').grid(row=0, column=0)
+        con_name_choose.grid(row=0, column=1)
+        con_name_choose.current(0)
+
+        def quit_butt():
+            sel_con_win.destroy()
+
+        tk.Button(sel_con_win, text='确定', width=15,
+                  command=lambda: self.sure_butt(con_name_choose, sel_con_win, box_dir)).grid(row=6, pady=2)
+        tk.Button(sel_con_win, text='退出', width=15, command=quit_butt).grid(row=6, column=1, pady=2, sticky='e')
+
+    def sure_butt(self, name, sel_con_win, box_dir):
+        """动态显示连接对象"""
+        name = name.get()
+        text = '当前连接对象：' + name
+        self.db_con.set(text)
+        sel_con_win.destroy()
+        self.con_list = []
+        self.con_list.append(name)
+        self.con_list.append(box_dir[name][0])
+        self.con_list.append(box_dir[name][1])
+        self.con_list.append(box_dir[name][2])
+        self.con_list.append(box_dir[name][3])
+        print(self.con_list)
 
 
 def get_files_encode(path):
@@ -332,3 +535,4 @@ def diropen():
 if __name__ == '__main__':
     CreateUi()
     # diropen()
+    # dir_call('D:\pycharm\workspace\mis3434\Java_scripts')
