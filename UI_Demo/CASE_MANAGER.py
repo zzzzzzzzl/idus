@@ -534,6 +534,6 @@ def diropen():
 
 if __name__ == '__main__':
     CreateUi()
-    # diropen()
-    # dir_call('D:\pycharm\workspace\mis3434\Java_scripts')
+    diropen()
+    dir_call('D:\pycharm\workspace\mis3434\Java_scripts')
     # qwretrewtre1234423
